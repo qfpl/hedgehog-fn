@@ -4,6 +4,7 @@
 {-# language TypeApplications #-}
 module Main where
 
+import Data.Int
 import Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -57,5 +58,9 @@ prop_map_list =
     Gen.bool
     Gen.bool
 
-main :: IO Bool
-main = checkParallel $$(discover)
+-- main :: IO Bool
+-- main = checkParallel $$(discover)
+
+main :: IO ()
+main =
+  take 10 . show <$> Gen.sample (fn @Int8 Gen.bool) >>= putStrLn

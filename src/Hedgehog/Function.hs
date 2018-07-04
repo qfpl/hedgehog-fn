@@ -21,15 +21,13 @@ module Hedgehog.Function
 where
 
 import Data.Functor.Contravariant (Contravariant(..))
-import Data.Functor.Contravariant.Divisible (Divisible(..), Decidable(..), divided, chosen)
+import Data.Functor.Contravariant.Divisible (Divisible(..), Decidable(..))
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (fromMaybe, fromJust)
-import Data.Semigroup ((<>))
 import Data.Void (Void, absurd)
 import Data.Word (Word8)
 import Hedgehog.Internal.Gen (GenT(..))
 import Hedgehog.Internal.Seed (Seed(..))
-import Data.Proxy (Proxy)
 
 import GHC.Generics
 
@@ -49,27 +47,31 @@ data a :-> c where
     -> a :-> c
   Table :: Eq a => [(a, c)] -> a :-> c
 
-table :: a :-> c -> [(a, c)]
-table (Unit c) = [((), c)]
-table Nil = []
-table (Pair f) = do
-  (a, bc) <- table f
-  (b, c) <- table bc
+table' :: a :-> c -> [(a, c)]
+table' (Unit c) = [((), c)]
+table' Nil = []
+table' (Pair f) = do
+  (a, bc) <- table' f
+  (b, c) <- table' bc
   pure ((a, b), c)
-table (Sum a b) = [(Left a, c) | (a, c) <- table a] ++ [(Right b, c) | (b, c) <- table b]
-table (Map _ f a) = do
-  (b, c) <- table a
+table' (Sum a b) = [(Left a, c) | (a, c) <- table' a] ++ [(Right b, c) | (b, c) <- table' b]
+table' (Map _ f a) = do
+  (b, c) <- table' a
   pure (f b, c)
-table (Table t) = t
+table' (Table t) = t
+
+table :: Fn a b -> [(a, b)]
+table (Fn _ a) = table' a
 
 showTable :: (Show a, Show b) => [(a, b)] -> String
 showTable [] = "<empty function>\n"
-showTable (x : xs) = unlines (showCase <$> x : xs)
+showTable (x : xs) =
+  showCase x ++ "\n" ++
+  case xs of
+    [] -> ""
+    _ -> showTable xs
   where
     showCase (lhs, rhs) = show lhs ++ " -> " ++ show rhs
-
-class GArg a where
-  gbuild' :: Monad m => (a x -> GenT m c) -> GenT m (a x :-> c)
 
 via
   :: Monad m
@@ -79,6 +81,9 @@ via
   -> (a -> GenT m c)
   -> GenT m (a :-> c)
 via bld ab ba f = Map ab ba <$> bld (f . ba)
+
+class GArg a where
+  gbuild' :: Monad m => (a x -> GenT m c) -> GenT m (a x :-> c)
 
 instance GArg V1 where
   gbuild' = via build (\case) absurd
@@ -122,36 +127,130 @@ class Arg a where
   default build :: (Monad m, Generic a, GArg (Rep a)) => (a -> GenT m c) -> GenT m (a :-> c)
   build = gbuild
 
-toBytes :: Integral a => a -> (Bool, [Word8])
-toBytes n
-  | n >= 0 = (True, go n)
-  | otherwise = (False, go $ -n - 1)
-  where
-    go n
-      | n == 0 = []
-      | otherwise =
-          let
-            (q, r) = quotRem n 256
-          in
-            go q <> [fromIntegral r]
+{-# inline gbuild2 #-}
+gbuild2 :: (Monad m, Generic a, GArg2 (Rep a)) => (a -> GenT m c) -> GenT m (a -> c)
+gbuild2 f = (. from) <$> gbuild2' (f . to)
 
-fromBytes :: Integral a => (Bool, [Word8]) -> a
-fromBytes (pos, bts)
-  | pos = go bts
-  | otherwise = negate $ go bts + 1
-  where
-    go = snd . foldr (\a (pow, val) -> (pow+1, val + fromIntegral a * 256 ^ pow)) (0, 0)
+class GArg2 a where
+  gbuild2' :: Monad m => (a x -> GenT m c) -> GenT m (a x -> c)
 
-{-# inline buildIntegral #-}
-buildIntegral :: (Monad m, Arg a, Integral a) => (a -> GenT m c) -> GenT m (a :-> c)
+instance GArg2 V1 where
+  gbuild2' = via' build' (\case) absurd
+
+instance GArg2 U1 where
+  gbuild2' = via' build' (\U1 -> ()) (\() -> U1)
+
+instance (GArg2 a, GArg2 b) => GArg2 (a :*: b) where
+  gbuild2' =
+    via'
+      (\f -> fmap uncurry . gbuild2' $ \a -> gbuild2' $ \b -> f (a, b))
+      (\(a :*: b) -> (a, b))
+      (\(a, b) -> a :*: b)
+
+instance {-# overlappable #-} (GArg2 a, GArg2 b) => GArg2 (a :+: b) where
+  gbuild2' =
+    via'
+      (\f ->
+         either <$>
+         gbuild2' (f . Left) <*>
+         gbuild2' (f . Right))
+      (\case; L1 a -> Left a; R1 a -> Right a)
+      (either L1 R1)
+
+instance GArg2 a => GArg2 (a :+: U1) where
+  gbuild2' f =
+    Gen.sized $ \n ->
+      if n < 1
+      then
+        (\aa s -> case s of
+          L1 _ -> undefined
+          R1 a -> aa a) <$>
+        gbuild2' (f . R1)
+      else
+        via'
+          (\f ->
+            either <$>
+            gbuild2' (Gen.small . f . Left) <*>
+            gbuild2' (Gen.small . f . Right))
+          (\case; L1 a -> Left a; R1 a -> Right a)
+          (either L1 R1)
+          f
+
+instance GArg2 b => GArg2 (U1 :+: b) where
+  gbuild2' f =
+    Gen.sized $ \n ->
+      if n < 1
+      then
+        (\aa s -> case s of
+          L1 a -> aa a
+          R1 _ -> undefined) <$>
+        gbuild2' (f . L1)
+      else
+        via'
+          (\f ->
+            either <$>
+            gbuild2' (Gen.small . f . Left) <*>
+            gbuild2' (Gen.small . f . Right))
+          (\case; L1 a -> Left a; R1 a -> Right a)
+          (either L1 R1)
+          f
+
+instance GArg2 c => GArg2 (M1 a b c) where
+  gbuild2' f = (. unM1) <$> gbuild2' (f . M1)
+
+instance Arg' b => GArg2 (K1 a b) where
+  gbuild2' f = (. unK1) <$> build' (Gen.small . f . K1)
+
+class Arg' a where
+  build' :: Monad m => (a -> GenT m c) -> GenT m (a -> c)
+  default build' :: (Monad m, Generic a, GArg2 (Rep a)) => (a -> GenT m c) -> GenT m (a -> c)
+  build' = gbuild2
+
+instance Arg' () where
+  build' f = const <$> f ()
+
+instance Arg' Void where
+  build' _ = pure absurd
+
+instance (Arg' a, Arg' b) => Arg' (Either a b) where
+  build' f =
+    either <$>
+    build' (f . Left) <*>
+    build' (f . Right)
+
+instance (Arg' a, Arg' b) => Arg' (a, b) where
+  build' f = uncurry <$> build' (\a -> build' $ \b -> f (a, b))
+
+via'
+  :: Monad m
+  => ((b -> GenT m c) -> GenT m (b -> c))
+  -> (a -> b)
+  -> (b -> a)
+  -> (a -> GenT m c)
+  -> GenT m (a -> c)
+via' bld ab ba f = (. ab) <$> bld (f . ba)
+
+buildIntegral :: (Monad m, Integral a) => (a -> GenT m c) -> GenT m (a :-> c)
 buildIntegral f =
-  Map toBytes fromBytes <$> build (f . fromBytes)
+  Map toInteger fromInteger <$>
+  build (f . fromInteger)
+
+buildIntegral' :: (Monad m, Integral a) => (a -> GenT m c) -> GenT m (a -> c)
+buildIntegral' f = (. const (toInteger 0)) <$> build' (f . const (fromIntegral 0))
 
 buildEnumBounded :: (Monad m, Eq a, Enum a, Bounded a) => (a -> GenT m c) -> GenT m (a :-> c)
 buildEnumBounded f = Table <$> traverse (\a -> (,) a <$> f a) [minBound..maxBound]
 
+buildEnumBounded' :: (Monad m, Eq a, Enum a, Bounded a) => (a -> GenT m c) -> GenT m (a -> c)
+buildEnumBounded' f =
+  (\tbl a -> fromJust $ lookup a tbl) <$>
+  traverse (\a -> (,) a <$> f a) [minBound..maxBound]
+
 variant :: Int64 -> GenT m b -> GenT m b
-variant n (GenT f) = GenT $ \sz sd -> f sz (sd { seedValue = seedValue sd + n})
+variant n (GenT f) =
+  GenT $
+  \sz sd ->
+    f sz (sd { seedValue = seedValue sd + n})
 
 variant' :: Int64 -> CoGenT m b -> CoGenT m b
 variant' n (CoGenT f) =
@@ -200,7 +299,10 @@ varyIntegral :: Integral a => CoGenT m a
 varyIntegral = CoGenT $ variant . fromIntegral
 
 -- CoGen ~ Op (Endo (Gen b))
-newtype CoGenT m a = CoGenT { applyCoGenT :: forall b. a -> GenT m b -> GenT m b }
+newtype CoGenT m a
+  = CoGenT
+  { applyCoGenT :: forall b. a -> GenT m b -> GenT m b
+  }
 
 instance Contravariant (CoGenT m) where
   contramap f (CoGenT g) = CoGenT (g . f)
@@ -208,19 +310,19 @@ instance Contravariant (CoGenT m) where
 instance Divisible (CoGenT m) where
   divide f (CoGenT gb) (CoGenT gc) =
     CoGenT $ \a ->
-    let (b, c) = f a in gc c . gb b
+    let (b, c) = f a in gb b . gc c
   conquer = CoGenT $ const id
 
 instance Decidable (CoGenT m) where
   choose f (CoGenT gb) (CoGenT gc) =
     CoGenT $ \a ->
     case f a of
-      Left b -> gb b . variant 0
-      Right c -> gc c . variant 1
+      Left b -> variant 0 . gb b
+      Right c -> variant 1 . gc c
   lose f = CoGenT $ \a -> absurd (f a)
 
 instance (Show a, Show b) => Show (a :-> b) where
-  show = show . table
+  show = show . table'
 
 apply' :: a :-> b -> a -> Maybe b
 apply' (Unit c) () = Just c
@@ -240,7 +342,7 @@ data Fn a b = Fn b (a :-> b)
 
 instance (Show a, Show b) => Show (Fn a b) where
   show (Fn b a) =
-    case table a of
+    case table' a of
       [] -> "_ -> " ++ show b
       ta -> showTable ta ++ "_ -> " ++ show b
 
@@ -252,9 +354,13 @@ shrinkFn = shrinkFn' (const [])
     shrinkFn' _ Nil = []
     shrinkFn' shr (Pair f) = Pair <$> shrinkFn' (shrinkFn' shr) f
     shrinkFn' shr (Sum a b) =
-      [ Sum a Nil, Sum Nil b ] ++
+      [ Sum a Nil | notNil b ] ++
+      [ Sum Nil b | notNil a ] ++
       fmap (`Sum` b) (shrinkFn' shr a) ++
       fmap (a `Sum`) (shrinkFn' shr b)
+      where
+        notNil Nil = False
+        notNil _ = True
     shrinkFn' shr (Map f g h) = Map f g <$> shrinkFn' shr h
     shrinkFn' shr (Table t) = Table <$> Shrink.list t
 
@@ -267,6 +373,9 @@ fnWith cg gb =
 
 fn :: (Arg a, Vary a, Monad m) => GenT m b -> GenT m (Fn a b)
 fn = fnWith vary
+
+fn' :: (Arg' a, Vary a, Monad m) => GenT m b -> GenT m (a -> b)
+fn' gb = build' $ \a -> applyCoGenT vary a gb
 
 instance Vary ()
 instance (Vary a, Vary b) => Vary (Either a b)
@@ -282,6 +391,7 @@ instance Vary Int16 where; vary = varyIntegral
 instance Vary Int32 where; vary = varyIntegral
 instance Vary Int64 where; vary = varyIntegral
 instance Vary Word8 where; vary = varyIntegral
+instance Vary Integer where; vary = varyIntegral
 
 instance Arg Void where; build f = pure Nil
 instance Arg () where; build f = Unit <$> f ()
@@ -305,3 +415,64 @@ instance Arg Int16 where; build = buildIntegral
 instance Arg Int32 where; build = buildIntegral
 instance Arg Int64 where; build = buildIntegral
 instance Arg Word8 where; build = buildEnumBounded
+instance Arg Integer where
+  build f = Map toBytes fromBytes <$> build (f . fromBytes)
+    where
+      -- bytes, least significant bit first
+
+      toBytes :: Integer -> Either [Word8] [Word8]
+      toBytes n
+        | n >= 0 = Right $ go n
+        | otherwise = Left $ go (-n - 1)
+        where
+          go 0 = []
+          go n =
+            let
+              (q, r) = quotRem n 256
+            in
+              fromIntegral r : go q
+
+      fromBytes :: Either [Word8] [Word8] -> Integer
+      fromBytes a =
+        case a of
+          Right bts -> go bts
+          Left bts -> negate $ go bts + 1
+        where
+          go [] = 0
+          go (x:xs) = toInteger x + 256 * go xs
+
+instance Arg' Bool
+instance Arg' Ordering
+instance Arg' a => Arg' (Maybe a)
+instance Arg' a => Arg' [a]
+instance Arg' Int where; build' = buildIntegral'
+instance Arg' Int8 where; build' = buildIntegral'
+instance Arg' Int16 where; build' = buildIntegral'
+instance Arg' Int32 where; build' = buildIntegral'
+instance Arg' Int64 where; build' = buildIntegral'
+instance Arg' Word8 where; build' = buildEnumBounded'
+instance Arg' Integer where
+  build' f = (. toBytes) <$> build' (f . fromBytes)
+    where
+      -- bytes, least significant bit first
+
+      toBytes :: Integer -> Either [Word8] [Word8]
+      toBytes n
+        | n >= 0 = Right $ go n
+        | otherwise = Left $ go (-n - 1)
+        where
+          go 0 = []
+          go n =
+            let
+              (q, r) = quotRem n 256
+            in
+              fromIntegral r : go q
+
+      fromBytes :: Either [Word8] [Word8] -> Integer
+      fromBytes a =
+        case a of
+          Right bts -> go bts
+          Left bts -> negate $ go bts + 1
+        where
+          go [] = 0
+          go (x:xs) = toInteger x + 256 * go xs
