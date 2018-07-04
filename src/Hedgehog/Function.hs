@@ -39,9 +39,7 @@ data a :-> c where
   Unit :: c -> () :-> c
   Nil :: a :-> c
   Pair :: a :-> b :-> c -> (a, b) :-> c
-  Lft :: a :-> c -> Either a b :-> c
-  Rgt :: b :-> c -> Either a b :-> c
-  App :: a :-> c -> a :-> c -> a :-> c
+  Sum :: a :-> c -> b :-> c -> Either a b :-> c
   Map
     :: (a -> b)
     -> (b -> a)
@@ -51,13 +49,11 @@ data a :-> c where
 table :: a :-> c -> [(a, c)]
 table (Unit c) = [((), c)]
 table Nil = []
-table (App a b) = table a ++ table b
 table (Pair f) = do
   (a, bc) <- table f
   (b, c) <- table bc
   pure ((a, b), c)
-table (Lft a) = [(Left a, c) | (a, c) <- table a]
-table (Rgt b) = [(Right b, c) | (b, c) <- table b]
+table (Sum a b) = [(Left a, c) | (a, c) <- table a] ++ [(Right b, c) | (b, c) <- table b]
 table (Map _ f a) = do
   (b, c) <- table a
   pure (f b, c)
@@ -97,9 +93,9 @@ instance (GArg a, GArg b) => GArg (a :+: b) where
   gbuild' =
     via
       (\f ->
-         App <$>
-         (Lft <$> gbuild' (f . Left)) <*>
-         (Rgt <$> gbuild' (f . Right)))
+         Sum <$>
+         gbuild' (f . Left) <*>
+         gbuild' (f . Right))
       (\case; L1 a -> Left a; R1 a -> Right a)
       (either L1 R1)
 
@@ -239,11 +235,9 @@ apply' Nil _ = Nothing
 apply' (Pair f) (a, b) = do
   f' <- apply' f a
   apply' f' b
-apply' (Lft f) (Left a) = apply' f a
-apply' (Rgt f) (Right a) = apply' f a
-apply' (App f g) a = maybe (apply' g a) Just (apply' f a)
+apply' (Sum f _) (Left a) = apply' f a
+apply' (Sum _ g) (Right a) = apply' g a
 apply' (Map f _ g) a = apply' g (f a)
-apply' _ _ = Nothing
 
 unsafeApply :: a :-> b -> a -> b
 unsafeApply f = fromJust . apply' f
@@ -263,12 +257,10 @@ shrinkFn = shrinkFn' (const [])
     shrinkFn' shr (Unit a) = Unit <$> shr a
     shrinkFn' _ Nil = []
     shrinkFn' shr (Pair f) = Pair <$> shrinkFn' (shrinkFn' shr) f
-    shrinkFn' shr (Lft f) = Lft <$> shrinkFn' shr f
-    shrinkFn' shr (Rgt f) = Rgt <$> shrinkFn' shr f
-    shrinkFn' shr (App a b) =
-      [a, b] ++
-      fmap (`App` b) (shrinkFn' shr a) ++
-      fmap (a `App`) (shrinkFn' shr b)
+    shrinkFn' shr (Sum a b) =
+      [ Sum a Nil, Sum Nil b ] ++
+      fmap (`Sum` b) (shrinkFn' shr a) ++
+      fmap (a `Sum`) (shrinkFn' shr b)
     shrinkFn' shr (Map f g h) = Map f g <$> shrinkFn' shr h
 
 apply :: Fn a b -> a -> b
@@ -303,9 +295,9 @@ instance (Arg a, Arg b) => Arg (a, b) where
 
 instance (Arg a, Arg b) => Arg (Either a b) where
   build f =
-    App <$>
-    (Lft <$> build (f . Left)) <*>
-    (Rgt <$> build (f . Right))
+    Sum <$>
+    build (f . Left) <*>
+    build (f . Right)
 
 instance Arg Bool
 instance Arg Ordering
