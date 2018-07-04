@@ -26,6 +26,7 @@ import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (fromMaybe, fromJust)
 import Data.Semigroup ((<>))
 import Data.Void (Void, absurd)
+import Data.Word (Word8)
 import Hedgehog.Internal.Gen (GenT(..))
 import Hedgehog.Internal.Seed (Seed(..))
 import Data.Proxy (Proxy)
@@ -33,6 +34,7 @@ import Data.Proxy (Proxy)
 import GHC.Generics
 
 import qualified Hedgehog.Gen as Gen
+import qualified Hedgehog.Internal.Shrink as Shrink
 
 infixr 5 :->
 data a :-> c where
@@ -45,6 +47,7 @@ data a :-> c where
     -> (b -> a)
     -> b :-> c
     -> a :-> c
+  Table :: Eq a => [(a, c)] -> a :-> c
 
 table :: a :-> c -> [(a, c)]
 table (Unit c) = [((), c)]
@@ -57,6 +60,7 @@ table (Sum a b) = [(Left a, c) | (a, c) <- table a] ++ [(Right b, c) | (b, c) <-
 table (Map _ f a) = do
   (b, c) <- table a
   pure (f b, c)
+table (Table t) = t
 
 showTable :: (Show a, Show b) => [(a, b)] -> String
 showTable [] = "<empty function>\n"
@@ -118,44 +122,33 @@ class Arg a where
   default build :: (Monad m, Generic a, GArg (Rep a)) => (a -> GenT m c) -> GenT m (a :-> c)
   build = gbuild
 
-toBits :: Integral a => a -> (Bool, [Bool])
-toBits n
+toBytes :: Integral a => a -> (Bool, [Word8])
+toBytes n
   | n >= 0 = (True, go n)
   | otherwise = (False, go $ -n - 1)
   where
     go n
       | n == 0 = []
-      | otherwise = 
+      | otherwise =
           let
-            (q, r) = quotRem n 2
+            (q, r) = quotRem n 256
           in
-            go q <> [if toInteger r == 1 then True else False]
+            go q <> [fromIntegral r]
 
-fromBits :: Integral a => (Bool, [Bool]) -> a
-fromBits (pos, bts)
+fromBytes :: Integral a => (Bool, [Word8]) -> a
+fromBytes (pos, bts)
   | pos = go bts
   | otherwise = negate $ go bts + 1
   where
-    go = snd . foldr (\a (pow, val) -> (pow+1, if a then val + 2 ^ pow else val)) (0, 0)
+    go = snd . foldr (\a (pow, val) -> (pow+1, val + fromIntegral a * 256 ^ pow)) (0, 0)
 
 {-# inline buildIntegral #-}
 buildIntegral :: (Monad m, Arg a, Integral a) => (a -> GenT m c) -> GenT m (a :-> c)
 buildIntegral f =
-  Map toBits fromBits <$> build (f . fromBits)
-  -- Map fromInt toInt <$> build (f . toInt)
-  where
-    {-
-    fromInt :: Integral a => a -> Either (Bool, a) Bool
-    fromInt x =
-      case toInteger x of
-        0 -> Right False
-        -1 -> Right True
-        _ -> Left (odd x, x `div` 2)
+  Map toBytes fromBytes <$> build (f . fromBytes)
 
-    toInt (Right False) = 0
-    toInt (Right True) = -1
-    toInt (Left (b, x)) = if b then 1 else 0 + 2*x
--}
+buildEnumBounded :: (Monad m, Eq a, Enum a, Bounded a) => (a -> GenT m c) -> GenT m (a :-> c)
+buildEnumBounded f = Table <$> traverse (\a -> (,) a <$> f a) [minBound..maxBound]
 
 variant :: Int64 -> GenT m b -> GenT m b
 variant n (GenT f) = GenT $ \sz sd -> f sz (sd { seedValue = seedValue sd + n})
@@ -238,6 +231,7 @@ apply' (Pair f) (a, b) = do
 apply' (Sum f _) (Left a) = apply' f a
 apply' (Sum _ g) (Right a) = apply' g a
 apply' (Map f _ g) a = apply' g (f a)
+apply' (Table t) a = lookup a t
 
 unsafeApply :: a :-> b -> a -> b
 unsafeApply f = fromJust . apply' f
@@ -262,6 +256,7 @@ shrinkFn = shrinkFn' (const [])
       fmap (`Sum` b) (shrinkFn' shr a) ++
       fmap (a `Sum`) (shrinkFn' shr b)
     shrinkFn' shr (Map f g h) = Map f g <$> shrinkFn' shr h
+    shrinkFn' shr (Table t) = Table <$> Shrink.list t
 
 apply :: Fn a b -> a -> b
 apply (Fn b f) = fromMaybe b . apply' f
@@ -286,6 +281,7 @@ instance Vary Int8 where; vary = varyIntegral
 instance Vary Int16 where; vary = varyIntegral
 instance Vary Int32 where; vary = varyIntegral
 instance Vary Int64 where; vary = varyIntegral
+instance Vary Word8 where; vary = varyIntegral
 
 instance Arg Void where; build f = pure Nil
 instance Arg () where; build f = Unit <$> f ()
@@ -308,3 +304,4 @@ instance Arg Int8 where; build = buildIntegral
 instance Arg Int16 where; build = buildIntegral
 instance Arg Int32 where; build = buildIntegral
 instance Arg Int64 where; build = buildIntegral
+instance Arg Word8 where; build = buildEnumBounded
