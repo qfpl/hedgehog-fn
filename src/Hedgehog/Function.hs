@@ -2,6 +2,10 @@
 {-# language FlexibleContexts, DefaultSignatures #-}
 {-# language ScopedTypeVariables #-}
 {-# language TypeOperators #-}
+{-# language LambdaCase #-}
+{-# language TypeApplications #-}
+{-# language EmptyCase #-}
+{-# language FlexibleInstances #-}
 module Hedgehog.Function
   ( module GHC.Generics
   , Fn
@@ -13,22 +17,23 @@ module Hedgehog.Function
   )
 where
 
-import Data.Void (absurd)
+import Data.Void (Void, absurd)
 import Data.Maybe (fromMaybe, fromJust)
 import Data.Functor.Contravariant (Contravariant(..))
 import Data.Functor.Contravariant.Divisible (Divisible(..), Decidable(..), divided, chosen)
 import Data.Int (Int64)
-import Generics.Eot (HasEot(..), Void)
 import Hedgehog.Internal.Gen (GenT(..))
 import Hedgehog.Internal.Seed (Seed(..))
+import Data.Proxy (Proxy)
 
-import qualified GHC.Generics
+import GHC.Generics
+
 import qualified Hedgehog.Gen as Gen
 
 infixr 5 :->
 data a :-> c where
   Unit :: c -> () :-> c
-  Nil :: Void :-> c
+  Nil :: a :-> c
   Pair :: a :-> b :-> c -> (a, b) :-> c
   Lft :: a :-> c -> Either a b :-> c
   Rgt :: b :-> c -> Either a b :-> c
@@ -59,22 +64,70 @@ showTable (x : xs) = unlines (showCase <$> x : xs)
   where
     showCase (lhs, rhs) = show lhs ++ " -> " ++ show rhs
 
-class Arg a where
-  build :: Monad m => (a -> GenT m c) -> GenT m (a :-> c)
-  default build :: (Monad m, HasEot a, Arg (Eot a)) => (a -> GenT m c) -> GenT m (a :-> c)
-  build f = Map toEot fromEot <$> build (f . fromEot)
+class GArg a where
+  gbuild :: Monad m => (a x -> GenT m c) -> GenT m (a x :-> c)
 
 instance Arg Void where
   build f = pure Nil
 
+via
+  :: Monad m
+  => ((b -> GenT m c) -> GenT m (b :-> c))
+  -> (a -> b)
+  -> (b -> a)
+  -> (a -> GenT m c)
+  -> GenT m (a :-> c)
+via bld ab ba f = Map ab ba <$> bld (f . ba)
+
+instance GArg V1 where
+  gbuild = via build (\case) absurd
+
 instance Arg () where
   build f = Unit <$> f ()
+
+instance GArg U1 where
+  gbuild = via build (\U1 -> ()) (\() -> U1)
 
 instance (Arg a, Arg b) => Arg (a, b) where
   build f = fmap Pair . build $ \a -> build $ \b -> f (a, b)
 
+instance (GArg a, GArg b) => GArg (a :*: b) where
+  gbuild =
+    via
+      (\f -> fmap Pair . gbuild $ \a -> gbuild $ \b -> f (a, b))
+      (\(a :*: b) -> (a, b))
+      (\(a, b) -> a :*: b)
+
 instance (Arg a, Arg b) => Arg (Either a b) where
-  build f = App <$> (Lft <$> build (f . Left)) <*> (Rgt <$> build (f . Right))
+  build f =
+    App <$>
+    (Lft <$> build (f . Left)) <*>
+    (Rgt <$> build (f . Right))
+
+instance (GArg a, GArg b) => GArg (a :+: b) where
+  gbuild =
+    via
+      (\f ->
+         App <$>
+         (Lft <$> gbuild (f . Left)) <*>
+         (Rgt <$> gbuild (f . Right)))
+      (\case; L1 a -> Left a; R1 a -> Right a)
+      (either L1 R1)
+
+instance GArg c => GArg (M1 a b c) where
+  gbuild f = Map unM1 M1 <$> gbuild (f . M1)
+
+instance Arg b => GArg (K1 a b) where
+  gbuild f =
+    Gen.recursive
+      Gen.choice
+      [ pure Nil ]
+      [ Map unK1 K1 <$> build (f . K1) ]
+
+class Arg a where
+  build :: Monad m => (a -> GenT m c) -> GenT m (a :-> c)
+  default build :: (Monad m, Generic a, GArg (Rep a)) => (a -> GenT m c) -> GenT m (a :-> c)
+  build f = Map from to <$> gbuild (f . to)
 
 variant :: Int64 -> GenT m b -> GenT m b
 variant n (GenT f) = GenT $ \sz sd -> f sz (sd { seedValue = seedValue sd + n})
@@ -83,22 +136,39 @@ variant' :: Int64 -> CoGenT m b -> CoGenT m b
 variant' n (CoGenT f) =
   CoGenT $ \a -> variant n . f a
 
+class GVary a where
+  gvary :: CoGenT m (a x)
+
+instance GVary V1 where
+  gvary = conquer
+
+instance GVary U1 where
+  gvary = conquer
+
+instance (GVary a, GVary b) => GVary (a :+: b) where
+  gvary =
+    choose
+      (\case; L1 a -> Left a; R1 a -> Right a)
+      (variant' 0 gvary)
+      (variant' 1 gvary)
+
+instance (GVary a, GVary b) => GVary (a :*: b) where
+  gvary =
+    divide
+      (\(a :*: b) -> (a, b))
+      (variant' 0 gvary)
+      (variant' 1 gvary)
+
+instance GVary c => GVary (M1 a b c) where
+  gvary = contramap unM1 gvary
+
+instance Vary b => GVary (K1 a b) where
+  gvary = contramap unK1 vary
+
 class Vary a where
   vary :: CoGenT m a
-  default vary :: (HasEot a, Vary (Eot a)) => CoGenT m a
-  vary = CoGenT $ \a -> applyCoGenT vary (toEot a)
-
-instance Vary Void where
-  vary = conquer
-
-instance Vary () where
-  vary = conquer
-
-instance (Vary a, Vary b) => Vary (Either a b) where
-  vary = chosen (variant' 0 vary) (variant' 1 vary)
-
-instance (Vary a, Vary b) => Vary (a, b) where
-  vary = divided (variant' 0 vary) (variant' 1 vary)
+  default vary :: (Generic a, GVary (Rep a)) => CoGenT m a
+  vary = CoGenT $ \a -> applyCoGenT gvary (from a)
 
 -- CoGen ~ Op (Endo (Gen b))
 newtype CoGenT m a = CoGenT { applyCoGenT :: forall b. a -> GenT m b -> GenT m b }
@@ -125,9 +195,7 @@ instance (Show a, Show b) => Show (a :-> b) where
 
 apply' :: a :-> b -> a -> Maybe b
 apply' (Unit c) () = Just c
-apply' Nil a =
-  case a of
-    _ -> error "impossible"
+apply' Nil _ = Nothing
 apply' (Pair f) (a, b) = do
   f' <- apply' f a
   apply' f' b
@@ -168,12 +236,12 @@ apply (Fn b f) = fromMaybe b . apply' f
 
 fnWith :: (Monad m, Arg a) => CoGenT m a -> GenT m b -> GenT m (Fn a b)
 fnWith cg gb =
-  Gen.shrink (\(Fn b f) -> Fn b <$> shrinkFn f) $
-  Fn <$> gb <*> build (\a -> applyCoGenT cg a gb)
+  Fn <$> gb <*> Gen.shrink shrinkFn (build $ \a -> applyCoGenT cg a gb)
 
-fn :: (Monad m, Arg a, Vary a) => GenT m b -> GenT m (Fn a b)
+fn :: (Arg a, Vary a, Monad m) => GenT m b -> GenT m (Fn a b)
 fn = fnWith vary
 
+instance Vary ()
 instance Vary Bool
 instance Vary Ordering
 instance Vary a => Vary (Maybe a)
