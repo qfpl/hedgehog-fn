@@ -16,14 +16,14 @@ fun_idempotent
   => Gen a
   -> PropertyT m ()
 fun_idempotent ga = do
-  f <- fmap apply . forAll $ fn @a ga
+  f <- forAll $ fn @a ga
   a <- forAll ga
-  f a === f (f a)
+  apply f a === apply f (apply f a)
 
 prop_unit_fun_idempotent :: Property
 prop_unit_fun_idempotent =
-  property $
-    fun_idempotent $ pure ()
+  property $ do
+    fun_idempotent $ Gen.int (Range.constant minBound maxBound)
 
 -- | map (f . g) xs = map f (map g xs)
 map_compose
@@ -53,9 +53,9 @@ prop_map_list =
   property $
   map_compose
     (Gen.list (Range.constant 0 100))
+    (Gen.int $ Range.constant minBound maxBound)
     Gen.bool
-    Gen.bool
-    Gen.bool
+    (Gen.int $ Range.constant minBound maxBound)
 
 main :: IO Bool
 main = checkParallel $$(discover)

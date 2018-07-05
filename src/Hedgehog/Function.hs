@@ -20,20 +20,25 @@ module Hedgehog.Function
   -- )
 where
 
+import Control.Monad.Trans.Maybe (MaybeT(..))
+import Data.Discrimination (Grouping, nub)
 import Data.Functor.Contravariant (Contravariant(..))
 import Data.Functor.Contravariant.Divisible (Divisible(..), Decidable(..), divided, chosen)
+import Data.Functor.Identity (Identity(..))
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (fromMaybe, fromJust)
 import Data.Semigroup ((<>))
 import Data.Void (Void, absurd)
-import Data.Word (Word8)
-import Hedgehog.Internal.Gen (GenT(..))
+import Data.Word (Word8, Word16, Word32, Word64)
+import Hedgehog.Internal.Gen (Gen, GenT(..), runGenT)
 import Hedgehog.Internal.Seed (Seed(..))
+import Hedgehog.Internal.Tree (Tree(..), Node(..))
 import Data.Proxy (Proxy)
 
 import GHC.Generics
 
 import qualified Hedgehog.Gen as Gen
+import qualified Hedgehog.Range as Range
 import qualified Hedgehog.Internal.Shrink as Shrink
 
 infixr 5 :->
@@ -113,7 +118,6 @@ instance Arg b => GArg (K1 a b) where
       [ pure Nil ]
       [ Map unK1 K1 <$> build (f . K1) ]
 
-{-# inline gbuild #-}
 gbuild :: (Monad m, Generic a, GArg (Rep a)) => (a -> GenT m c) -> GenT m (a :-> c)
 gbuild f = Map from to <$> gbuild' (f . to)
 
@@ -133,22 +137,32 @@ toBytes n
           let
             (q, r) = quotRem n 256
           in
-            go q <> [fromIntegral r]
+            fromIntegral r : go q
 
 fromBytes :: Integral a => (Bool, [Word8]) -> a
 fromBytes (pos, bts)
   | pos = go bts
   | otherwise = negate $ go bts + 1
   where
-    go = snd . foldr (\a (pow, val) -> (pow+1, val + fromIntegral a * 256 ^ pow)) (0, 0)
+    go [] = 0
+    go (x:xs) = fromIntegral x + 256 * go xs
 
-{-# inline buildIntegral #-}
 buildIntegral :: (Monad m, Arg a, Integral a) => (a -> GenT m c) -> GenT m (a :-> c)
 buildIntegral f =
   Map toBytes fromBytes <$> build (f . fromBytes)
 
 buildEnumBounded :: (Monad m, Eq a, Enum a, Bounded a) => (a -> GenT m c) -> GenT m (a :-> c)
 buildEnumBounded f = Table <$> traverse (\a -> (,) a <$> f a) [minBound..maxBound]
+
+buildTable
+  :: (Monad m, Grouping a, Eq a, Integral a, Bounded r)
+  => (Range.Range r -> GenT m a)
+  -> (a -> GenT m c)
+  -> GenT m (a :-> c)
+buildTable ga f = do
+  n <- Gen.integral (Range.constant 0 4000)
+  as <- Gen.list (Range.constant 0 n) (ga $ Range.constant minBound maxBound)
+  Table <$> traverse (\a -> (,) a <$> f a) (nub as)
 
 variant :: Int64 -> GenT m b -> GenT m b
 variant n (GenT f) = GenT $ \sz sd -> f sz (sd { seedValue = seedValue sd + n})
@@ -186,7 +200,6 @@ instance GVary c => GVary (M1 a b c) where
 instance Vary b => GVary (K1 a b) where
   gvary' = contramap unK1 vary
 
-{-# inline gvary #-}
 gvary :: (Generic a, GVary (Rep a)) => CoGenT m a
 gvary = CoGenT $ \a -> applyCoGenT gvary' (from a)
 
@@ -195,7 +208,6 @@ class Vary a where
   default vary :: (Generic a, GVary (Rep a)) => CoGenT m a
   vary = gvary
 
-{-# inline varyIntegral #-}
 varyIntegral :: Integral a => CoGenT m a
 varyIntegral = CoGenT $ variant . fromIntegral
 
@@ -281,7 +293,11 @@ instance Vary Int8 where; vary = varyIntegral
 instance Vary Int16 where; vary = varyIntegral
 instance Vary Int32 where; vary = varyIntegral
 instance Vary Int64 where; vary = varyIntegral
+instance Vary Word where; vary = varyIntegral
 instance Vary Word8 where; vary = varyIntegral
+instance Vary Word16 where; vary = varyIntegral
+instance Vary Word32 where; vary = varyIntegral
+instance Vary Word64 where; vary = varyIntegral
 
 instance Arg Void where; build f = pure Nil
 instance Arg () where; build f = Unit <$> f ()
@@ -299,9 +315,13 @@ instance Arg Bool
 instance Arg Ordering
 instance Arg a => Arg (Maybe a)
 instance Arg a => Arg [a]
-instance Arg Int where; build = buildIntegral
-instance Arg Int8 where; build = buildIntegral
-instance Arg Int16 where; build = buildIntegral
-instance Arg Int32 where; build = buildIntegral
-instance Arg Int64 where; build = buildIntegral
-instance Arg Word8 where; build = buildEnumBounded
+instance Arg Int where; build = buildTable Gen.int
+instance Arg Int8 where; build = buildTable Gen.int8
+instance Arg Int16 where; build = buildTable Gen.int16
+instance Arg Int32 where; build = buildTable Gen.int32
+instance Arg Int64 where; build = buildTable Gen.int64
+instance Arg Word where; build = buildTable Gen.word
+instance Arg Word8 where; build = buildTable Gen.word8
+instance Arg Word16 where; build = buildTable Gen.word16
+instance Arg Word32 where; build = buildTable Gen.word32
+instance Arg Word64 where; build = buildTable Gen.word64
