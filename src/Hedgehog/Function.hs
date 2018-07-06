@@ -173,7 +173,11 @@ instance (Show a, Show b) => Show (Fn a b) where
       showTable [] = "<empty function>\n"
       showTable (x : xs) = unlines (showCase <$> x : xs)
         where
-          showCase (lhs, rhs) = show lhs ++ " -> " ++ show (runIdentity $ unsafeFromTree rhs)
+          showCase (lhs, rhs) =
+            show lhs ++
+            " -> " ++
+            show (runIdentity $ unsafeFromTree rhs)
+            -- show rhs
 
 shrinkFn :: (b -> [b]) -> a :-> b -> [a :-> b]
 shrinkFn shr (Unit a) = Unit <$> shr a
@@ -202,7 +206,9 @@ shrinkTree (Tree m) = do
   a <- runMaybeT m
   case a of
     Nothing -> pure []
-    Just (Node _ cs) -> pure cs
+    Just (Node _ cs) ->
+      pure cs
+      -- concat <$> traverse shrinkTree cs
 
 apply :: Fn a b -> a -> b
 apply (Fn b f) = maybe b (runIdentity . unsafeFromTree) . apply' f
@@ -280,33 +286,29 @@ instance GArg c => GArg (M1 a b c) where
 instance Arg b => GArg (K1 a b) where
   gbuild f = Map unK1 K1 . build $ f . K1
 
+
 buildIntegral :: (Arg a, Integral a) => (a -> c) -> (a :-> c)
-buildIntegral f =
-  Map toBits fromBits $ build (f . fromBits)
+buildIntegral f = Map toBits fromBits $ build (f . fromBits)
   where
     toBits :: Integral a => a -> (Bool, [Bool])
     toBits n
       | n >= 0 = (True, go n)
       | otherwise = (False, go $ -n - 1)
       where
-        go n
-          | n == 0 = []
-          | otherwise =
-              let
-                (q, r) = quotRem n 2
-              in
-                go q <> [r == 1]
+        go 0 = []
+        go n =
+          let
+            (q, r) = quotRem n 2
+          in
+            (r == 1) : go q
 
     fromBits :: Integral a => (Bool, [Bool]) -> a
     fromBits (pos, bts)
       | pos = go bts
       | otherwise = negate $ go bts + 1
       where
-        go =
-          snd .
-          foldr
-            (\a (pow, val) -> (pow+1, val + (if a then 1 else 0) * 256 ^ pow))
-            (0, 0)
+        go ([]) = 0
+        go (x:xs) = (if x then 1 else 0) + 2 * go xs
 
 instance Arg Bool
 instance Arg Ordering
