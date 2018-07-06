@@ -4,6 +4,7 @@
 {-# language TypeApplications #-}
 module Main where
 
+import Data.Int (Int8)
 import Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -16,14 +17,14 @@ fun_idempotent
   => Gen a
   -> PropertyT m ()
 fun_idempotent ga = do
-  f <- fmap apply . forAll $ fn @a ga
   a <- forAll ga
+  f <- fmap apply . forAll $ fn @a ga
   f a === f (f a)
 
 prop_unit_fun_idempotent :: Property
 prop_unit_fun_idempotent =
   property $
-    fun_idempotent $ pure ()
+    fun_idempotent $ Gen.int8 (Range.constant minBound maxBound)
 
 -- | map (f . g) xs = map f (map g xs)
 map_compose

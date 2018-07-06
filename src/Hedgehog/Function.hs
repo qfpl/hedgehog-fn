@@ -1,4 +1,5 @@
 {-# language GADTs, RankNTypes #-}
+{-# language GeneralizedNewtypeDeriving #-}
 {-# language FlexibleContexts, DefaultSignatures #-}
 {-# language ScopedTypeVariables #-}
 {-# language TypeOperators #-}
@@ -6,6 +7,8 @@
 {-# language TypeApplications #-}
 {-# language EmptyCase #-}
 {-# language FlexibleInstances #-}
+{-# language TypeFamilies #-}
+{-# language UndecidableInstances #-}
 module Hedgehog.Function
   -- ( module GHC.Generics
   -- , Fn
@@ -20,20 +23,26 @@ module Hedgehog.Function
   -- )
 where
 
+import Control.Monad.Trans.Maybe (MaybeT(..))
+import Data.Bifunctor (first)
+import Data.Bool (bool)
 import Data.Functor.Contravariant (Contravariant(..))
 import Data.Functor.Contravariant.Divisible (Divisible(..), Decidable(..), divided, chosen)
+import Data.Functor.Identity (Identity(..))
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (fromMaybe, fromJust)
 import Data.Semigroup ((<>))
 import Data.Void (Void, absurd)
 import Data.Word (Word8)
-import Hedgehog.Internal.Gen (GenT(..))
+import Hedgehog.Internal.Gen (GenT(..), Gen, runGenT)
 import Hedgehog.Internal.Seed (Seed(..))
+import Hedgehog.Internal.Tree (Tree(..), Node(..))
 import Data.Proxy (Proxy)
 
 import GHC.Generics
 
 import qualified Hedgehog.Gen as Gen
+import qualified Hedgehog.Internal.Tree as Tree
 import qualified Hedgehog.Internal.Shrink as Shrink
 
 infixr 5 :->
@@ -42,12 +51,14 @@ data a :-> c where
   Nil :: a :-> c
   Pair :: a :-> b :-> c -> (a, b) :-> c
   Sum :: a :-> c -> b :-> c -> Either a b :-> c
-  Map
-    :: (a -> b)
-    -> (b -> a)
-    -> b :-> c
-    -> a :-> c
-  Table :: Eq a => [(a, c)] -> a :-> c
+  Map :: (a -> b) -> (b -> a) -> b :-> c -> a :-> c
+
+instance Functor ((:->) r) where
+  fmap f (Unit c) = Unit $ f c
+  fmap _ Nil = Nil
+  fmap f (Pair a) = Pair $ fmap (fmap f) a
+  fmap f (Sum a b) = Sum (fmap f a) (fmap f b)
+  fmap f (Map a b c) = Map a b (fmap f c)
 
 table :: a :-> c -> [(a, c)]
 table (Unit c) = [((), c)]
@@ -57,98 +68,15 @@ table (Pair f) = do
   (b, c) <- table bc
   pure ((a, b), c)
 table (Sum a b) = [(Left a, c) | (a, c) <- table a] ++ [(Right b, c) | (b, c) <- table b]
-table (Map _ f a) = do
-  (b, c) <- table a
-  pure (f b, c)
-table (Table t) = t
-
-showTable :: (Show a, Show b) => [(a, b)] -> String
-showTable [] = "<empty function>\n"
-showTable (x : xs) = unlines (showCase <$> x : xs)
-  where
-    showCase (lhs, rhs) = show lhs ++ " -> " ++ show rhs
+table (Map _ g a) = fmap (first g) $ table a
 
 class GArg a where
-  gbuild' :: Monad m => (a x -> GenT m c) -> GenT m (a x :-> c)
-
-via
-  :: Monad m
-  => ((b -> GenT m c) -> GenT m (b :-> c))
-  -> (a -> b)
-  -> (b -> a)
-  -> (a -> GenT m c)
-  -> GenT m (a :-> c)
-via bld ab ba f = Map ab ba <$> bld (f . ba)
-
-instance GArg V1 where
-  gbuild' = via build (\case) absurd
-
-instance GArg U1 where
-  gbuild' = via build (\U1 -> ()) (\() -> U1)
-
-instance (GArg a, GArg b) => GArg (a :*: b) where
-  gbuild' =
-    via
-      (\f -> fmap Pair . gbuild' $ \a -> gbuild' $ \b -> f (a, b))
-      (\(a :*: b) -> (a, b))
-      (\(a, b) -> a :*: b)
-
-instance (GArg a, GArg b) => GArg (a :+: b) where
-  gbuild' =
-    via
-      (\f ->
-         Sum <$>
-         gbuild' (f . Left) <*>
-         gbuild' (f . Right))
-      (\case; L1 a -> Left a; R1 a -> Right a)
-      (either L1 R1)
-
-instance GArg c => GArg (M1 a b c) where
-  gbuild' f = Map unM1 M1 <$> gbuild' (f . M1)
-
-instance Arg b => GArg (K1 a b) where
-  gbuild' f =
-    Gen.recursive
-      Gen.choice
-      [ pure Nil ]
-      [ Map unK1 K1 <$> build (f . K1) ]
-
-{-# inline gbuild #-}
-gbuild :: (Monad m, Generic a, GArg (Rep a)) => (a -> GenT m c) -> GenT m (a :-> c)
-gbuild f = Map from to <$> gbuild' (f . to)
+  gbuild :: (a x -> c) -> a x :-> c
 
 class Arg a where
-  build :: Monad m => (a -> GenT m c) -> GenT m (a :-> c)
-  default build :: (Monad m, Generic a, GArg (Rep a)) => (a -> GenT m c) -> GenT m (a :-> c)
-  build = gbuild
-
-toBytes :: Integral a => a -> (Bool, [Word8])
-toBytes n
-  | n >= 0 = (True, go n)
-  | otherwise = (False, go $ -n - 1)
-  where
-    go n
-      | n == 0 = []
-      | otherwise =
-          let
-            (q, r) = quotRem n 256
-          in
-            go q <> [fromIntegral r]
-
-fromBytes :: Integral a => (Bool, [Word8]) -> a
-fromBytes (pos, bts)
-  | pos = go bts
-  | otherwise = negate $ go bts + 1
-  where
-    go = snd . foldr (\a (pow, val) -> (pow+1, val + fromIntegral a * 256 ^ pow)) (0, 0)
-
-{-# inline buildIntegral #-}
-buildIntegral :: (Monad m, Arg a, Integral a) => (a -> GenT m c) -> GenT m (a :-> c)
-buildIntegral f =
-  Map toBytes fromBytes <$> build (f . fromBytes)
-
-buildEnumBounded :: (Monad m, Eq a, Enum a, Bounded a) => (a -> GenT m c) -> GenT m (a :-> c)
-buildEnumBounded f = Table <$> traverse (\a -> (,) a <$> f a) [minBound..maxBound]
+  build :: (a -> c) -> a :-> c
+  default build :: (Generic a, GArg (Rep a)) => (a -> c) -> a :-> c
+  build = gvia from to
 
 variant :: Int64 -> GenT m b -> GenT m b
 variant n (GenT f) = GenT $ \sz sd -> f sz (sd { seedValue = seedValue sd + n})
@@ -186,7 +114,6 @@ instance GVary c => GVary (M1 a b c) where
 instance Vary b => GVary (K1 a b) where
   gvary' = contramap unK1 vary
 
-{-# inline gvary #-}
 gvary :: (Generic a, GVary (Rep a)) => CoGenT m a
 gvary = CoGenT $ \a -> applyCoGenT gvary' (from a)
 
@@ -195,7 +122,6 @@ class Vary a where
   default vary :: (Generic a, GVary (Rep a)) => CoGenT m a
   vary = gvary
 
-{-# inline varyIntegral #-}
 varyIntegral :: Integral a => CoGenT m a
 varyIntegral = CoGenT $ variant . fromIntegral
 
@@ -231,41 +157,69 @@ apply' (Pair f) (a, b) = do
 apply' (Sum f _) (Left a) = apply' f a
 apply' (Sum _ g) (Right a) = apply' g a
 apply' (Map f _ g) a = apply' g (f a)
-apply' (Table t) a = lookup a t
 
 unsafeApply :: a :-> b -> a -> b
 unsafeApply f = fromJust . apply' f
 
-data Fn a b = Fn b (a :-> b)
+data Fn a b = Fn b (a :-> Tree (MaybeT Identity) b)
 
 instance (Show a, Show b) => Show (Fn a b) where
   show (Fn b a) =
     case table a of
       [] -> "_ -> " ++ show b
       ta -> showTable ta ++ "_ -> " ++ show b
+    where
+      showTable :: (Show a, Show b) => [(a, Tree (MaybeT Identity) b)] -> String
+      showTable [] = "<empty function>\n"
+      showTable (x : xs) = unlines (showCase <$> x : xs)
+        where
+          showCase (lhs, rhs) = show lhs ++ " -> " ++ show (runIdentity $ unsafeFromTree rhs)
 
-shrinkFn :: a :-> b -> [a :-> b]
-shrinkFn = shrinkFn' (const [])
+shrinkFn :: (b -> [b]) -> a :-> b -> [a :-> b]
+shrinkFn shr (Unit a) = Unit <$> shr a
+shrinkFn _ Nil = []
+shrinkFn shr (Pair f) =
+  (\case; Nil -> Nil; a -> Pair a) <$> shrinkFn (shrinkFn shr) f
+shrinkFn shr (Sum a b) =
+  fmap (\case; Sum Nil Nil -> Nil; a -> a) $
+  [ Sum a Nil | notNil b ] ++
+  [ Sum Nil b | notNil a ] ++
+  fmap (`Sum` b) (shrinkFn shr a) ++
+  fmap (a `Sum`) (shrinkFn shr b)
   where
-    shrinkFn' :: (b -> [b]) -> a :-> b -> [a :-> b]
-    shrinkFn' shr (Unit a) = Unit <$> shr a
-    shrinkFn' _ Nil = []
-    shrinkFn' shr (Pair f) = Pair <$> shrinkFn' (shrinkFn' shr) f
-    shrinkFn' shr (Sum a b) =
-      [ Sum a Nil, Sum Nil b ] ++
-      fmap (`Sum` b) (shrinkFn' shr a) ++
-      fmap (a `Sum`) (shrinkFn' shr b)
-    shrinkFn' shr (Map f g h) = Map f g <$> shrinkFn' shr h
-    shrinkFn' shr (Table t) = Table <$> Shrink.list t
+    notNil Nil = False
+    notNil _ = True
+shrinkFn shr (Map f g a) = (\case; Nil -> Nil; a -> Map f g a) <$> shrinkFn shr a
+
+unsafeFromTree :: Functor m => Tree (MaybeT m) a -> m a
+unsafeFromTree =
+  fmap (maybe (error "empty generator in function") nodeValue) .
+  runMaybeT .
+  runTree
+
+shrinkTree :: Monad m => Tree (MaybeT m) a -> m [Tree (MaybeT m) a]
+shrinkTree (Tree m) = do
+  a <- runMaybeT m
+  case a of
+    Nothing -> pure []
+    Just (Node _ cs) -> pure cs
 
 apply :: Fn a b -> a -> b
-apply (Fn b f) = fromMaybe b . apply' f
+apply (Fn b f) = maybe b (runIdentity . unsafeFromTree) . apply' f
 
-fnWith :: (Monad m, Arg a) => CoGenT m a -> GenT m b -> GenT m (Fn a b)
+fnWith :: Arg a => CoGenT Identity a -> Gen b -> Gen (Fn a b)
 fnWith cg gb =
-  Fn <$> gb <*> Gen.shrink shrinkFn (build $ \a -> applyCoGenT cg a gb)
+  Fn <$>
+  gb <*>
+  genFn (\a -> applyCoGenT cg a gb)
+  where
+    genFn :: Arg a => (a -> Gen b) -> Gen (a :-> Tree (MaybeT Identity) b)
+    genFn g =
+      GenT $ \sz sd ->
+      Tree.unfold (shrinkFn $ runIdentity . shrinkTree) .
+      fmap (runGenT sz sd) $ build g
 
-fn :: (Arg a, Vary a, Monad m) => GenT m b -> GenT m (Fn a b)
+fn :: (Arg a, Vary a) => Gen b -> Gen (Fn a b)
 fn = fnWith vary
 
 instance Vary ()
@@ -276,32 +230,91 @@ instance Vary Bool
 instance Vary Ordering
 instance Vary a => Vary (Maybe a)
 instance Vary a => Vary [a]
-instance Vary Int where; vary = varyIntegral
 instance Vary Int8 where; vary = varyIntegral
 instance Vary Int16 where; vary = varyIntegral
 instance Vary Int32 where; vary = varyIntegral
 instance Vary Int64 where; vary = varyIntegral
+instance Vary Int where; vary = varyIntegral
+instance Vary Integer where; vary = varyIntegral
 instance Vary Word8 where; vary = varyIntegral
 
-instance Arg Void where; build f = pure Nil
-instance Arg () where; build f = Unit <$> f ()
+via :: Arg b => (a -> b) -> (b -> a) -> (a -> c) -> a :-> c
+via a b f = Map a b . build $ f . b
+
+instance Arg Void where
+  build _ = Nil
+
+instance Arg () where
+  build f = Unit $ f ()
 
 instance (Arg a, Arg b) => Arg (a, b) where
-  build f = fmap Pair . build $ \a -> build $ \b -> f (a, b)
+  build f = Pair . build $ \a -> build $ \b -> f (a, b)
 
 instance (Arg a, Arg b) => Arg (Either a b) where
-  build f =
-    Sum <$>
-    build (f . Left) <*>
-    build (f . Right)
+  build f = Sum (build $ f . Left) (build $ f . Right)
+
+gvia :: GArg b => (a -> b x) -> (b x -> a) -> (a -> c) -> a :-> c
+gvia a b f = Map a b . gbuild $ f . b
+
+instance GArg V1 where
+  gbuild _ = Nil
+
+instance GArg U1 where
+  gbuild f = Map (\U1 -> ()) (\() -> U1) (Unit $ f U1)
+
+instance (GArg a, GArg b) => GArg (a :*: b) where
+  gbuild f = Map fromPair toPair $ Pair . gbuild $ \a -> gbuild $ \b -> f (a :*: b)
+    where
+      fromPair (a :*: b) = (a, b)
+      toPair (a, b) = (a :*: b)
+
+instance (GArg a, GArg b) => GArg (a :+: b) where
+  gbuild f = Map fromSum toSum $ Sum (gbuild $ f . L1) (gbuild $ f . R1)
+    where
+      fromSum = \case; L1 a -> Left a; R1 a -> Right a
+      toSum = either L1 R1
+
+instance GArg c => GArg (M1 a b c) where
+  gbuild = gvia unM1 M1
+
+instance Arg b => GArg (K1 a b) where
+  gbuild f = Map unK1 K1 . build $ f . K1
+
+buildIntegral :: (Arg a, Integral a) => (a -> c) -> (a :-> c)
+buildIntegral f =
+  Map toBits fromBits $ build (f . fromBits)
+  where
+    toBits :: Integral a => a -> (Bool, [Bool])
+    toBits n
+      | n >= 0 = (True, go n)
+      | otherwise = (False, go $ -n - 1)
+      where
+        go n
+          | n == 0 = []
+          | otherwise =
+              let
+                (q, r) = quotRem n 2
+              in
+                go q <> [r == 1]
+
+    fromBits :: Integral a => (Bool, [Bool]) -> a
+    fromBits (pos, bts)
+      | pos = go bts
+      | otherwise = negate $ go bts + 1
+      where
+        go =
+          snd .
+          foldr
+            (\a (pow, val) -> (pow+1, val + (if a then 1 else 0) * 256 ^ pow))
+            (0, 0)
 
 instance Arg Bool
 instance Arg Ordering
 instance Arg a => Arg (Maybe a)
 instance Arg a => Arg [a]
-instance Arg Int where; build = buildIntegral
 instance Arg Int8 where; build = buildIntegral
 instance Arg Int16 where; build = buildIntegral
 instance Arg Int32 where; build = buildIntegral
 instance Arg Int64 where; build = buildIntegral
-instance Arg Word8 where; build = buildEnumBounded
+instance Arg Int where; build = buildIntegral
+instance Arg Integer where; build = buildIntegral
