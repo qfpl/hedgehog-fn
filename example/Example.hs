@@ -24,7 +24,7 @@ fun_idempotent ga = do
 prop_unit_fun_idempotent :: Property
 prop_unit_fun_idempotent =
   property $
-    fun_idempotent $ Gen.int8 (Range.constant minBound maxBound)
+    fun_idempotent $ Gen.choice [Right <$> Gen.bool :: Gen (Either () Bool)]
 
 -- | map (f . g) xs = map f (map g xs)
 map_compose

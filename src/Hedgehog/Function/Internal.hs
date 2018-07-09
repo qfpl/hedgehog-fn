@@ -12,7 +12,6 @@ import Data.Functor.Contravariant.Divisible (Divisible(..), Decidable(..))
 import Data.Functor.Identity (Identity(..))
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (fromJust)
-import Data.Semigroup ((<>))
 import Data.Void (Void, absurd)
 import Data.Word (Word8)
 import Hedgehog.Internal.Gen (GenT(..), Gen, runGenT)
@@ -261,32 +260,27 @@ instance Arg b => GArg (K1 a b) where
   gbuild f = Map unK1 K1 . build $ f . K1
 
 buildIntegral :: (Arg a, Integral a) => (a -> c) -> (a :-> c)
-buildIntegral f =
-  Map toBits fromBits $ build (f . fromBits)
+buildIntegral f = Map toBits fromBits $ build (f . fromBits)
   where
     toBits :: Integral a => a -> (Bool, [Bool])
     toBits n
       | n >= 0 = (True, go n)
       | otherwise = (False, go $ -n - 1)
       where
-        go n
-          | n == 0 = []
-          | otherwise =
-              let
-                (q, r) = quotRem n 2
-              in
-                go q <> [r == 1]
+        go 0 = []
+        go n =
+          let
+            (q, r) = quotRem n 2
+          in
+            (r == 1) : go q
 
     fromBits :: Integral a => (Bool, [Bool]) -> a
     fromBits (pos, bts)
       | pos = go bts
       | otherwise = negate $ go bts + 1
       where
-        go =
-          snd .
-          foldr
-            (\a (pow, val) -> (pow+1, val + (if a then 1 else 0) * 256 ^ pow))
-            (0, 0)
+        go ([]) = 0
+        go (x:xs) = (if x then 1 else 0) + 2 * go xs
 
 instance Arg Bool
 instance Arg Ordering
