@@ -46,8 +46,6 @@
 
 module Hedgehog.Function
   ( module GHC.Generics
-  , module Data.Functor.Contravariant
-  , module Data.Functor.Contravariant.Divisible
   , Fn
   -- * Generation
   , forAllFn
@@ -61,6 +59,8 @@ module Hedgehog.Function
   -- * Varying
   , CoGenT
   , CoGen
+  , module Data.Functor.Contravariant
+  , module Data.Functor.Contravariant.Divisible
   , gvary
   , varyIntegral
   , Vary(..)
