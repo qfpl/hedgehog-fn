@@ -17,12 +17,18 @@ import Data.Word (Word8)
 import Hedgehog.Internal.Gen (GenT(..), Gen, runGenT)
 import Hedgehog.Internal.Seed (Seed(..))
 import Hedgehog.Internal.Tree (Tree(..), Node(..))
+import Hedgehog.Internal.Property (PropertyT, forAll)
 
 import GHC.Generics
 
 import qualified Hedgehog.Internal.Tree as Tree
 
 infixr 5 :->
+
+-- | Shrinkable, showable functions
+--
+-- Claessen, K. (2012, September). Shrinking and showing functions:(functional pearl).
+-- In ACM SIGPLAN Notices (Vol. 47, No. 12, pp. 73-80). ACM.
 data a :-> c where
   Unit :: c -> () :-> c
   Nil :: a :-> c
@@ -37,6 +43,7 @@ instance Functor ((:->) r) where
   fmap f (Sum a b) = Sum (fmap f a) (fmap f b)
   fmap f (Map a b c) = Map a b (fmap f c)
 
+-- | Tabulate the function
 table :: a :-> c -> [(a, c)]
 table (Unit c) = [((), c)]
 table Nil = []
@@ -104,8 +111,16 @@ class Vary a where
 varyIntegral :: Integral a => CoGenT m a
 varyIntegral = CoGenT $ variant . fromIntegral
 
--- CoGen ~ Op (Endo (Gen b))
+-- |
+-- A @'CoGenT' m a@ is used to perturb a @'GenT' m b@ based on the value of the @a@. This way,
+-- the generated function will have a varying (but still deterministic) right hand side.
+--
+-- Co-generators can be build using 'Divisible' and 'Decidable', but it is recommended to
+-- derive 'Generic' and use the default instance of the 'Vary' type class.
+--
+-- @CoGenT m ~ Op (Endo (GenT m b))@
 newtype CoGenT m a = CoGenT { applyCoGenT :: forall b. a -> GenT m b -> GenT m b }
+type CoGen = CoGenT Identity
 
 instance Contravariant (CoGenT m) where
   contramap f (CoGenT g) = CoGenT (g . f)
@@ -127,6 +142,7 @@ instance Decidable (CoGenT m) where
 instance (Show a, Show b) => Show (a :-> b) where
   show = show . table
 
+-- | Reflect a possibly partial function
 apply' :: a :-> b -> a -> Maybe b
 apply' (Unit c) () = Just c
 apply' Nil _ = Nothing
@@ -137,10 +153,18 @@ apply' (Sum f _) (Left a) = apply' f a
 apply' (Sum _ g) (Right a) = apply' g a
 apply' (Map f _ g) a = apply' g (f a)
 
+-- | Reflect a total function. Unsafe.
 unsafeApply :: a :-> b -> a -> b
 unsafeApply f = fromJust . apply' f
 
 data Fn a b = Fn b (a :-> Tree (MaybeT Identity) b)
+
+-- | Extract the root value from a 'Tree'. Unsafe.
+unsafeFromTree :: Functor m => Tree (MaybeT m) a -> m a
+unsafeFromTree =
+  fmap (maybe (error "empty generator in function") nodeValue) .
+  runMaybeT .
+  runTree
 
 instance (Show a, Show b) => Show (Fn a b) where
   show (Fn b a) =
@@ -154,6 +178,7 @@ instance (Show a, Show b) => Show (Fn a b) where
         where
           showCase (lhs, rhs) = show lhs ++ " -> " ++ show (runIdentity $ unsafeFromTree rhs)
 
+-- | Shrink the function
 shrinkFn :: (b -> [b]) -> a :-> b -> [a :-> b]
 shrinkFn shr (Unit a) = Unit <$> shr a
 shrinkFn _ Nil = []
@@ -170,12 +195,6 @@ shrinkFn shr (Sum a b) =
     notNil _ = True
 shrinkFn shr (Map f g a) = (\case; Nil -> Nil; a -> Map f g a) <$> shrinkFn shr a
 
-unsafeFromTree :: Functor m => Tree (MaybeT m) a -> m a
-unsafeFromTree =
-  fmap (maybe (error "empty generator in function") nodeValue) .
-  runMaybeT .
-  runTree
-
 shrinkTree :: Monad m => Tree (MaybeT m) a -> m [Tree (MaybeT m) a]
 shrinkTree (Tree m) = do
   a <- runMaybeT m
@@ -183,10 +202,12 @@ shrinkTree (Tree m) = do
     Nothing -> pure []
     Just (Node _ cs) -> pure cs
 
+-- | Reflect an 'Fn'
 apply :: Fn a b -> a -> b
 apply (Fn b f) = maybe b (runIdentity . unsafeFromTree) . apply' f
 
-fnWith :: Arg a => CoGenT Identity a -> Gen b -> Gen (Fn a b)
+-- | Generate a function using the user-supplied co-generator
+fnWith :: Arg a => CoGen a -> Gen b -> Gen (Fn a b)
 fnWith cg gb =
   Fn <$>
   gb <*>
@@ -198,8 +219,13 @@ fnWith cg gb =
       Tree.unfold (shrinkFn $ runIdentity . shrinkTree) .
       fmap (runGenT sz sd) $ build g
 
+-- | Generate a function
 fn :: (Arg a, Vary a) => Gen b -> Gen (Fn a b)
 fn = fnWith vary
+
+-- | Run the function generator to retrieve a function
+forAllFn :: (Show a, Show b, Monad m) => Gen (Fn a b) -> PropertyT m (a -> b)
+forAllFn = fmap apply . forAll
 
 instance Vary ()
 instance (Vary a, Vary b) => Vary (Either a b)
@@ -217,6 +243,7 @@ instance Vary Int where; vary = varyIntegral
 instance Vary Integer where; vary = varyIntegral
 instance Vary Word8 where; vary = varyIntegral
 
+-- | Reify a function via an isomorphism
 via :: Arg b => (a -> b) -> (b -> a) -> (a -> c) -> a :-> c
 via a b f = Map a b . build $ f . b
 
@@ -259,8 +286,9 @@ instance GArg c => GArg (M1 a b c) where
 instance Arg b => GArg (K1 a b) where
   gbuild f = Map unK1 K1 . build $ f . K1
 
+-- | Reify a function on 'Integral's
 buildIntegral :: (Arg a, Integral a) => (a -> c) -> (a :-> c)
-buildIntegral f = Map toBits fromBits $ build (f . fromBits)
+buildIntegral = via toBits fromBits
   where
     toBits :: Integral a => a -> (Bool, [Bool])
     toBits n
@@ -279,7 +307,7 @@ buildIntegral f = Map toBits fromBits $ build (f . fromBits)
       | pos = go bts
       | otherwise = negate $ go bts + 1
       where
-        go ([]) = 0
+        go [] = 0
         go (x:xs) = (if x then 1 else 0) + 2 * go xs
 
 instance Arg Bool

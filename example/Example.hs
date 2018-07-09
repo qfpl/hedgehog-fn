@@ -1,10 +1,9 @@
-{-# language FlexibleContexts #-}
 {-# language ScopedTypeVariables #-}
 {-# language TemplateHaskell #-}
 {-# language TypeApplications #-}
+{-# language RankNTypes #-}
 module Main where
 
-import Data.Int (Int8)
 import Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -28,30 +27,29 @@ prop_unit_fun_idempotent =
 
 -- | map (f . g) xs = map f (map g xs)
 map_compose
-  :: forall f a b c m
+  :: forall f a b c
    . ( Functor f
-     , Eq (f c)
      , Show (f a)
-     , Show (f c)
      , Show a, Arg a, Vary a
      , Show b, Arg b, Vary b
      , Show c
-     , Monad m
+     , Eq (f c)
+     , Show (f c)
      )
-  => (Gen a -> Gen (f a))
+  => (forall x. Gen x -> Gen (f x))
   -> Gen a
   -> Gen b
   -> Gen c
-  -> PropertyT m ()
-map_compose genF genA genB genC = do
-  g <- fmap apply . forAll $ fn @a genB
-  f <- fmap apply . forAll $ fn @b genC
-  xs <- forAll $ genF genA
-  fmap (f . g) xs === fmap f (fmap g xs)
+  -> Property
+map_compose genF genA genB genC =
+  property $ do
+    g <- forAllFn $ fn @a genB
+    f <- forAllFn $ fn @b genC
+    xs <- forAll $ genF genA
+    fmap (f . g) xs === fmap f (fmap g xs)
 
 prop_map_list :: Property
 prop_map_list =
-  property $
   map_compose
     (Gen.list (Range.constant 0 100))
     Gen.bool
