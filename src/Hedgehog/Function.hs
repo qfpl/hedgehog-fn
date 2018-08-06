@@ -7,8 +7,8 @@
 -- data A = ...
 --   deriving (Generic, ...)
 --
--- instance Arg A where
--- instance Vary A where
+-- instance Arg A
+-- instance Vary A
 --
 -- genB :: MonadGen m => m B
 -- genB = ...
