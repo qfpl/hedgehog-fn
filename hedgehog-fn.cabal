@@ -21,7 +21,7 @@ library
   other-modules:       Hedgehog.Function.Internal
   build-depends:       base >=4.8 && <5
                      , contravariant >=1.4 && <1.6
-                     , hedgehog >=0.5 && <0.6
+                     , hedgehog >=0.6 && <0.7
                      , transformers >=0.5 && <0.6
   hs-source-dirs:      src
   if impl(ghc>=8.0)

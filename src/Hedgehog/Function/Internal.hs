@@ -13,7 +13,7 @@ import Data.Functor.Identity (Identity(..))
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (fromJust)
 import Data.Void (Void, absurd)
-import Data.Word (Word8)
+import Data.Word (Word8, Word64)
 import Hedgehog.Internal.Gen (GenT(..), Gen, runGenT)
 import Hedgehog.Internal.Seed (Seed(..))
 import Hedgehog.Internal.Tree (Tree(..), Node(..))
@@ -64,10 +64,10 @@ class Arg a where
   default build :: (Generic a, GArg (Rep a)) => (a -> c) -> a :-> c
   build = gvia from to
 
-variant :: Int64 -> GenT m b -> GenT m b
+variant :: Word64 -> GenT m b -> GenT m b
 variant n (GenT f) = GenT $ \sz sd -> f sz (sd { seedValue = seedValue sd + n})
 
-variant' :: Int64 -> CoGenT m b -> CoGenT m b
+variant' :: Word64 -> CoGenT m b -> CoGenT m b
 variant' n (CoGenT f) =
   CoGenT $ \a -> variant n . f a
 
