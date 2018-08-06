@@ -7,11 +7,12 @@ module Hedgehog.Function.Internal where
 
 import Control.Monad.Trans.Maybe (MaybeT(..))
 import Data.Bifunctor (first)
-import Data.Functor.Contravariant (Contravariant(..))
+import Data.Functor.Contravariant (Contravariant(..), Op)
 import Data.Functor.Contravariant.Divisible (Divisible(..), Decidable(..))
 import Data.Functor.Identity (Identity(..))
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (fromJust)
+import Data.Monoid (Endo)
 import Data.Void (Void, absurd)
 import Data.Word (Word8)
 import Hedgehog.Internal.Gen (GenT(..), Gen, runGenT)
@@ -57,12 +58,17 @@ table (Sum a b) =
 table (Map _ g a) = first g <$> table a
 
 class GArg a where
-  gbuild :: (a x -> c) -> a x :-> c
+  gbuild' :: (a x -> c) -> a x :-> c
 
+-- | Reify a function whose domain has an instance of 'Generic'
+gbuild :: (Generic a, GArg (Rep a)) => (a -> c) -> a :-> c
+gbuild = gvia from to
+
+-- | @instance Arg A where@ allows functions which take @A@s to be reified
 class Arg a where
   build :: (a -> c) -> a :-> c
   default build :: (Generic a, GArg (Rep a)) => (a -> c) -> a :-> c
-  build = gvia from to
+  build = gbuild
 
 variant :: Int64 -> GenT m b -> GenT m b
 variant n (GenT f) = GenT $ \sz sd -> f sz (sd { seedValue = seedValue sd + n})
@@ -103,6 +109,10 @@ instance Vary b => GVary (K1 a b) where
 gvary :: (Generic a, GVary (Rep a)) => CoGenT m a
 gvary = CoGenT $ \a -> applyCoGenT gvary' (from a)
 
+-- | 'Vary' provides a canonical co-generator for a type.
+--
+-- While technically there are many possible co-generators for a given type, we don't get any
+-- benefit from caring.
 class Vary a where
   vary :: CoGenT m a
   default vary :: (Generic a, GVary (Rep a)) => CoGenT m a
@@ -115,10 +125,10 @@ varyIntegral = CoGenT $ variant . fromIntegral
 -- A @'CoGenT' m a@ is used to perturb a @'GenT' m b@ based on the value of the @a@. This way,
 -- the generated function will have a varying (but still deterministic) right hand side.
 --
--- Co-generators can be build using 'Divisible' and 'Decidable', but it is recommended to
+-- Co-generators can be built using 'Divisible' and 'Decidable', but it is recommended to
 -- derive 'Generic' and use the default instance of the 'Vary' type class.
 --
--- @CoGenT m ~ Op (Endo (GenT m b))@
+-- @'CoGenT' m ~ 'Op' ('Endo' ('GenT' m b))@
 newtype CoGenT m a = CoGenT { applyCoGenT :: forall b. a -> GenT m b -> GenT m b }
 type CoGen = CoGenT Identity
 
@@ -142,7 +152,7 @@ instance Decidable (CoGenT m) where
 instance (Show a, Show b) => Show (a :-> b) where
   show = show . table
 
--- | Reflect a possibly partial function
+-- | Evaluate a possibly partial function
 apply' :: a :-> b -> a -> Maybe b
 apply' (Unit c) () = Just c
 apply' Nil _ = Nothing
@@ -153,10 +163,11 @@ apply' (Sum f _) (Left a) = apply' f a
 apply' (Sum _ g) (Right a) = apply' g a
 apply' (Map f _ g) a = apply' g (f a)
 
--- | Reflect a total function. Unsafe.
+-- | Evaluate a total function. Unsafe.
 unsafeApply :: a :-> b -> a -> b
 unsafeApply f = fromJust . apply' f
 
+-- | The type of randomly-generated functions
 data Fn a b = Fn b (a :-> Tree (MaybeT Identity) b)
 
 -- | Extract the root value from a 'Tree'. Unsafe.
@@ -202,7 +213,7 @@ shrinkTree (Tree m) = do
     Nothing -> pure []
     Just (Node _ cs) -> pure cs
 
--- | Reflect an 'Fn'
+-- | Evaluate an 'Fn'
 apply :: Fn a b -> a -> b
 apply (Fn b f) = maybe b (runIdentity . unsafeFromTree) . apply' f
 
@@ -243,7 +254,14 @@ instance Vary Int where; vary = varyIntegral
 instance Vary Integer where; vary = varyIntegral
 instance Vary Word8 where; vary = varyIntegral
 
--- | Reify a function via an isomorphism
+-- | Reify a function via an isomorphism.
+--
+-- If your function's domain has no instance of 'Generic' then you can still reify it using
+-- an isomorphism to a better domain type. For example, the 'Arg' instance for 'Integral'
+-- uses an isomorphism from @Integral a => a@ to @(Bool, [Bool])@, where the first element
+-- is the sign, and the second element is the bit-string.
+--
+-- Note: @via f g@ will only be well-behaved if @g . f = id@ and @f . g = id@
 via :: Arg b => (a -> b) -> (b -> a) -> (a -> c) -> a :-> c
 via a b f = Map a b . build $ f . b
 
@@ -260,31 +278,31 @@ instance (Arg a, Arg b) => Arg (Either a b) where
   build f = Sum (build $ f . Left) (build $ f . Right)
 
 gvia :: GArg b => (a -> b x) -> (b x -> a) -> (a -> c) -> a :-> c
-gvia a b f = Map a b . gbuild $ f . b
+gvia a b f = Map a b . gbuild' $ f . b
 
 instance GArg V1 where
-  gbuild _ = Nil
+  gbuild' _ = Nil
 
 instance GArg U1 where
-  gbuild f = Map (\U1 -> ()) (\() -> U1) (Unit $ f U1)
+  gbuild' f = Map (\U1 -> ()) (\() -> U1) (Unit $ f U1)
 
 instance (GArg a, GArg b) => GArg (a :*: b) where
-  gbuild f = Map fromPair toPair $ Pair . gbuild $ \a -> gbuild $ \b -> f (a :*: b)
+  gbuild' f = Map fromPair toPair $ Pair . gbuild' $ \a -> gbuild' $ \b -> f (a :*: b)
     where
       fromPair (a :*: b) = (a, b)
       toPair (a, b) = (a :*: b)
 
 instance (GArg a, GArg b) => GArg (a :+: b) where
-  gbuild f = Map fromSum toSum $ Sum (gbuild $ f . L1) (gbuild $ f . R1)
+  gbuild' f = Map fromSum toSum $ Sum (gbuild' $ f . L1) (gbuild' $ f . R1)
     where
       fromSum = \case; L1 a -> Left a; R1 a -> Right a
       toSum = either L1 R1
 
 instance GArg c => GArg (M1 a b c) where
-  gbuild = gvia unM1 M1
+  gbuild' = gvia unM1 M1
 
 instance Arg b => GArg (K1 a b) where
-  gbuild f = Map unK1 K1 . build $ f . K1
+  gbuild' f = Map unK1 K1 . build $ f . K1
 
 -- | Reify a function on 'Integral's
 buildIntegral :: (Arg a, Integral a) => (a -> c) -> (a :-> c)

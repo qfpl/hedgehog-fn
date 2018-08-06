@@ -1,4 +1,25 @@
 -- |
+-- The general procedure for generating functions of type @A -> B@ looks something like this:
+--
+-- @
+-- {-\# language TypeApplications \#-}
+--
+-- data A = ...
+--   deriving (Generic, ...)
+--
+-- instance Arg A where
+-- instance Vary A where
+--
+-- genB :: MonadGen m => m B
+-- genB = ...
+--
+-- prop_test :: Property
+-- prop_test =
+--   property $ do
+--     f <- forAllFn $ fn @A genB
+--     ...
+-- @
+--
 -- Here's an example of how to use the library to test the "fmap composition" law.
 --
 -- @ScopedTypeVariables@ and @TypeApplications@ are recommended for ease of use. @RankNTypes@
@@ -54,13 +75,14 @@ module Hedgehog.Function
   , fnWith
   -- * Building
   , gbuild
+  , via
   , buildIntegral
   , Arg(..)
   -- * Varying
-  , CoGenT
-  , CoGen
   , module Data.Functor.Contravariant
   , module Data.Functor.Contravariant.Divisible
+  , CoGenT
+  , CoGen
   , gvary
   , varyIntegral
   , Vary(..)
