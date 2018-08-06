@@ -2,7 +2,11 @@
 -- The general procedure for generating functions of type @A -> B@ looks something like this:
 --
 -- @
+-- {-\# language DeriveGeneric \#-}
 -- {-\# language TypeApplications \#-}
+--
+-- import Hedgehog
+-- import Hedgehog.Function
 --
 -- data A = ...
 --   deriving (Generic, ...)
