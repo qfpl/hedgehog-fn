@@ -11,15 +11,14 @@ license:             BSD3
 license-file:        LICENCE
 author:              Isaac Elliott
 maintainer:          Queensland Functional Programming Lab <oᴉ˙ldɟb@llǝʞsɐɥ>
-homepage:            https://github.com/qfpl/church-maybe
-bug-reports:         https://github.com/qfpl/church-maybe/issues
-category:            Testing
 homepage:            https://github.com/qfpl/hedgehog-fn
 bug-reports:         https://github.com/qfpl/hedgehog-fn/issues
+category:            Testing
 build-type:          Simple
+cabal-version:       >=1.10
 extra-source-files:  ChangeLog.md
-cabal-version:       >=2.0
 tested-with:         GHC==7.10.3, GHC==8.0.2, GHC==8.2.2, GHC==8.4.3
+
 source-repository    head
   type:              git
   location:          git@github.com:qfpl/hedgehog-fn.git
