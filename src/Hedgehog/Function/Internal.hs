@@ -7,12 +7,11 @@ module Hedgehog.Function.Internal where
 
 import Control.Monad.Trans.Maybe (MaybeT(..))
 import Data.Bifunctor (first)
-import Data.Functor.Contravariant (Contravariant(..), Op)
+import Data.Functor.Contravariant (Contravariant(..))
 import Data.Functor.Contravariant.Divisible (Divisible(..), Decidable(..))
 import Data.Functor.Identity (Identity(..))
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Maybe (fromJust)
-import Data.Monoid (Endo)
 import Data.Void (Void, absurd)
 import Data.Word (Word8)
 import Hedgehog.Internal.Gen (GenT(..), Gen, runGenT)
@@ -53,8 +52,8 @@ table (Pair f) = do
   (b, c) <- table bc
   pure ((a, b), c)
 table (Sum a b) =
-  [(Left a, c) | (a, c) <- table a] ++
-  [(Right b, c) | (b, c) <- table b]
+  [(Left x, c) | (x, c) <- table a] ++
+  [(Right x, c) | (x, c) <- table b]
 table (Map _ g a) = first g <$> table a
 
 class GArg a where
@@ -128,7 +127,7 @@ varyIntegral = CoGenT $ variant . fromIntegral
 -- Co-generators can be built using 'Divisible' and 'Decidable', but it is recommended to
 -- derive 'Generic' and use the default instance of the 'Vary' type class.
 --
--- @'CoGenT' m ~ 'Op' ('Endo' ('GenT' m b))@
+-- @'CoGenT' m ~ 'Data.Functor.Contravariabe.Op' ('Data.Monoid.Endo' ('GenT' m b))@
 newtype CoGenT m a = CoGenT { applyCoGenT :: forall b. a -> GenT m b -> GenT m b }
 type CoGen = CoGenT Identity
 
@@ -196,7 +195,7 @@ shrinkFn _ Nil = []
 shrinkFn shr (Pair f) =
   (\case; Nil -> Nil; a -> Pair a) <$> shrinkFn (shrinkFn shr) f
 shrinkFn shr (Sum a b) =
-  fmap (\case; Sum Nil Nil -> Nil; a -> a) $
+  fmap (\case; Sum Nil Nil -> Nil; x -> x) $
   [ Sum a Nil | notNil b ] ++
   [ Sum Nil b | notNil a ] ++
   fmap (`Sum` b) (shrinkFn shr a) ++
@@ -204,7 +203,7 @@ shrinkFn shr (Sum a b) =
   where
     notNil Nil = False
     notNil _ = True
-shrinkFn shr (Map f g a) = (\case; Nil -> Nil; a -> Map f g a) <$> shrinkFn shr a
+shrinkFn shr (Map f g a) = (\case; Nil -> Nil; x -> Map f g x) <$> shrinkFn shr a
 
 shrinkTree :: Monad m => Tree (MaybeT m) a -> m [Tree (MaybeT m) a]
 shrinkTree (Tree m) = do
@@ -314,9 +313,9 @@ buildIntegral = via toBits fromBits
       | otherwise = (False, go $ -n - 1)
       where
         go 0 = []
-        go n =
+        go m =
           let
-            (q, r) = quotRem n 2
+            (q, r) = quotRem m 2
           in
             (r == 1) : go q
 
