@@ -2,19 +2,31 @@
 -- see http://haskell.org/cabal/users-guide/
 
 name:                hedgehog-fn
-version:             0.1.0.0
--- synopsis:
--- description:
+version:             0.5
+synopsis:            Function generation for `hedgehog`
+description:         Generating shrinkable, showable functions with `hedgehog`. See
+                     `Hedgehog.Function` for example usages.
 license:             BSD3
 --                   Must be spelled with a 'C' for nix
 license-file:        LICENCE
 author:              Isaac Elliott
-maintainer:          haskell@qfpl.io
--- copyright:
--- category:
+maintainer:          Queensland Functional Programming Lab <oᴉ˙ldɟb@llǝʞsɐɥ>
+homepage:            https://github.com/qfpl/church-maybe
+bug-reports:         https://github.com/qfpl/church-maybe/issues
+category:            Testing
+homepage:            https://github.com/qfpl/hedgehog-fn
+bug-reports:         https://github.com/qfpl/hedgehog-fn/issues
 build-type:          Simple
 extra-source-files:  ChangeLog.md
 cabal-version:       >=2.0
+tested-with:         GHC==7.10.3, GHC==8.0.2, GHC==8.2.2, GHC==8.4.3
+source-repository    head
+  type:              git
+  location:          git@github.com:qfpl/hedgehog-fn.git
+
+flag build-examples
+  description: Build the example executables
+  default: False
 
 library
   exposed-modules:     Hedgehog.Function
@@ -26,4 +38,16 @@ library
   hs-source-dirs:      src
   if impl(ghc>=8.0)
     ghc-options:         -Wincomplete-patterns
+  default-language:    Haskell2010
+
+executable example
+  main-is:             Example.hs
+  if flag(build-examples) && impl(ghc>=8.0)
+    buildable:         True
+  else
+    buildable:         False
+  hs-source-dirs:      example
+  build-depends:       base >=4.8 && <5
+                     , hedgehog >=0.5 && <0.6
+                     , hedgehog-fn
   default-language:    Haskell2010
