@@ -105,6 +105,7 @@ instance GVary c => GVary (M1 a b c) where
 instance Vary b => GVary (K1 a b) where
   gvary' = contramap unK1 vary
 
+-- | Build a co-generator for a type which has a 'Generic' instance
 gvary :: (Generic a, GVary (Rep a)) => CoGenT m a
 gvary = CoGenT $ \a -> applyCoGenT gvary' (from a)
 
@@ -117,6 +118,7 @@ class Vary a where
   default vary :: (Generic a, GVary (Rep a)) => CoGenT m a
   vary = gvary
 
+-- | Build a co-generator for an 'Integral' type
 varyIntegral :: Integral a => CoGenT m a
 varyIntegral = CoGenT $ variant . fromIntegral
 
