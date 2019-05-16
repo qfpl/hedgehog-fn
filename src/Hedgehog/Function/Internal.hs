@@ -16,7 +16,7 @@ import Data.Void (Void, absurd)
 import Data.Word (Word8, Word64)
 import Hedgehog.Internal.Gen (GenT(..), Gen, runGenT)
 import Hedgehog.Internal.Seed (Seed(..))
-import Hedgehog.Internal.Tree (Tree(..), Node(..))
+import Hedgehog.Internal.Tree (TreeT(..), NodeT(..))
 import Hedgehog.Internal.Property (PropertyT, forAll)
 
 import GHC.Generics
@@ -169,14 +169,14 @@ unsafeApply :: a :-> b -> a -> b
 unsafeApply f = fromJust . apply' f
 
 -- | The type of randomly-generated functions
-data Fn a b = Fn b (a :-> Tree (MaybeT Identity) b)
+data Fn a b = Fn b (a :-> TreeT (MaybeT Identity) b)
 
--- | Extract the root value from a 'Tree'. Unsafe.
-unsafeFromTree :: Functor m => Tree (MaybeT m) a -> m a
+-- | Extract the root value from a 'TreeT'. Unsafe.
+unsafeFromTree :: Functor m => TreeT (MaybeT m) a -> m a
 unsafeFromTree =
   fmap (maybe (error "empty generator in function") nodeValue) .
   runMaybeT .
-  runTree
+  runTreeT
 
 instance (Show a, Show b) => Show (Fn a b) where
   show (Fn b a) =
@@ -184,7 +184,7 @@ instance (Show a, Show b) => Show (Fn a b) where
       [] -> "_ -> " ++ show b
       ta -> showTable ta ++ "_ -> " ++ show b
     where
-      showTable :: (Show a, Show b) => [(a, Tree (MaybeT Identity) b)] -> String
+      showTable :: (Show a, Show b) => [(a, TreeT (MaybeT Identity) b)] -> String
       showTable [] = "<empty function>\n"
       showTable (x : xs) = unlines (showCase <$> x : xs)
         where
@@ -207,12 +207,12 @@ shrinkFn shr (Sum a b) =
     notNil _ = True
 shrinkFn shr (Map f g a) = (\case; Nil -> Nil; x -> Map f g x) <$> shrinkFn shr a
 
-shrinkTree :: Monad m => Tree (MaybeT m) a -> m [Tree (MaybeT m) a]
-shrinkTree (Tree m) = do
+shrinkTree :: Monad m => TreeT (MaybeT m) a -> m [TreeT (MaybeT m) a]
+shrinkTree (Tree.TreeT m) = do
   a <- runMaybeT m
   case a of
     Nothing -> pure []
-    Just (Node _ cs) -> pure cs
+    Just (Tree.NodeT _ cs) -> pure cs
 
 -- | Evaluate an 'Fn'
 apply :: Fn a b -> a -> b
@@ -225,7 +225,7 @@ fnWith cg gb =
   gb <*>
   genFn (\a -> applyCoGenT cg a gb)
   where
-    genFn :: Arg a => (a -> Gen b) -> Gen (a :-> Tree (MaybeT Identity) b)
+    genFn :: Arg a => (a -> Gen b) -> Gen (a :-> TreeT (MaybeT Identity) b)
     genFn g =
       GenT $ \sz sd ->
       Tree.unfold (shrinkFn $ runIdentity . shrinkTree) .
