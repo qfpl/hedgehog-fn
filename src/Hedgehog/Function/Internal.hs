@@ -169,7 +169,14 @@ unsafeApply :: a :-> b -> a -> b
 unsafeApply f = fromJust . apply' f
 
 -- | The type of randomly-generated functions
+{-
+The lone 'b' here is important; we need is as a fall-through case so that we
+can have finitely-sized showable functions. If we didn't have it, then we'd
+never be able to render functions that have an infinitely-sized argument
+(like functions on Integers).
+-}
 data Fn a b = Fn b (a :-> TreeT (MaybeT Identity) b)
+
 
 -- | Extract the root value from a 'TreeT'. Unsafe.
 unsafeFromTree :: Functor m => TreeT (MaybeT m) a -> m a
@@ -180,15 +187,17 @@ unsafeFromTree =
 
 instance (Show a, Show b) => Show (Fn a b) where
   show (Fn b a) =
+    "\\case\n" ++
     case table a of
-      [] -> "_ -> " ++ show b
-      ta -> showTable ta ++ "_ -> " ++ show b
+      [] -> "  _ -> " ++ show b
+      ta -> showTable ta ++ "  _ -> " ++ show b
     where
       showTable :: (Show a, Show b) => [(a, TreeT (MaybeT Identity) b)] -> String
-      showTable [] = "<empty function>\n"
+      showTable [] = "  <empty function>\n"
       showTable (x : xs) = unlines (showCase <$> x : xs)
         where
-          showCase (lhs, rhs) = show lhs ++ " -> " ++ show (runIdentity $ unsafeFromTree rhs)
+          showCase (lhs, rhs) =
+            "  " ++ show lhs ++ " -> " ++ show (runIdentity $ unsafeFromTree rhs)
 
 -- | Shrink the function
 shrinkFn :: (b -> [b]) -> a :-> b -> [a :-> b]
