@@ -1,29 +1,49 @@
-{-# language ScopedTypeVariables #-}
-{-# language TemplateHaskell #-}
-{-# language TypeApplications #-}
-{-# language RankNTypes #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+
 module Main where
 
-import Hedgehog
-import qualified Hedgehog.Gen as Gen
-import qualified Hedgehog.Range as Range
+import           Hedgehog
+import qualified Hedgehog.Gen      as Gen
+import qualified Hedgehog.Range    as Range
 
-import Hedgehog.Function
+import           Hedgehog.Function
 
 fun_idempotent
   :: forall m a
   . (Monad m, Arg a, Vary a, Eq a, Show a)
   => Gen a
   -> PropertyT m ()
-fun_idempotent ga = do
-  a <- forAll ga
-  f <- fmap apply . forAll $ fn @a ga
+fun_idempotent genA = do
+  a <- forAll genA
+  f <- forAllFn $ fn @a genA
   f a === f (f a)
 
 prop_unit_fun_idempotent :: Property
 prop_unit_fun_idempotent =
   property $
     fun_idempotent $ Gen.choice [Right <$> Gen.bool :: Gen (Either () Bool)]
+
+fun_cong_equality
+  :: forall m a
+  . (Monad m, Arg a, Vary a, Eq a, Show a)
+  => Gen a
+  -> Gen a
+  -> PropertyT m ()
+fun_cong_equality genA genB = do
+  a <- forAll genA
+  b <- forAll genB
+  f <- forAllFn $ fn @a genA
+  if a == b
+    then f a === f b
+    else pure ()
+
+prop_fun_cong_equality :: Property
+prop_fun_cong_equality =
+  property $
+    fun_cong_equality (Gen.int (Range.linear 1 10)) (Gen.int (Range.linear 1 10))
 
 -- | map (f . g) xs = map f (map g xs)
 map_compose
@@ -57,4 +77,4 @@ prop_map_list =
     Gen.bool
 
 main :: IO Bool
-main = checkParallel $$(discover)
+main = checkParallel $$discover
